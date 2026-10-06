@@ -1,0 +1,1160 @@
+diff --git a/.github/workflows/build-apk.yml b/.github/workflows/build-apk.yml
+index 15451fc..964d5ae 100644
+--- a/.github/workflows/build-apk.yml
++++ b/.github/workflows/build-apk.yml
+@@ -24,9 +24,32 @@ jobs:
+         with:
+           gradle-version: '8.7'
+ 
++      # Restores the fixed signing key from repository secrets so every
++      # build can be installed over the last one. The key file only ever
++      # exists on this temporary runner; it is never committed or uploaded.
++      - name: Restore signing key
++        env:
++          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
++        run: |
++          if [ -n "$KEYSTORE_BASE64" ]; then
++            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/tidy-release.jks"
++            echo "TIDY_KEYSTORE_PATH=$RUNNER_TEMP/tidy-release.jks" >> "$GITHUB_ENV"
++            echo "Signing key restored."
++          else
++            echo "::warning::KEYSTORE_BASE64 secret not set. Falling back to a one-off debug key; this APK cannot be installed over a previous build."
++          fi
++
+       - name: Build release APK
++        env:
++          TIDY_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
++          TIDY_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
++          TIDY_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+         run: gradle :app:assembleRelease --no-daemon --stacktrace
+ 
++      - name: Remove signing key
++        if: always()
++        run: rm -f "$RUNNER_TEMP/tidy-release.jks"
++
+       - name: Upload APK
+         uses: actions/upload-artifact@v4
+         with:
+diff --git a/.gitignore b/.gitignore
+index 8ee9a35..c0a6b1f 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -9,3 +9,8 @@
+ .externalNativeBuild
+ .cxx
+ local.properties
++
++# Signing keys must never be committed (the repo is public)
++*.jks
++*.keystore
++keystore-secrets.txt
+diff --git a/README.md b/README.md
+index 0c2544a..6637552 100644
+--- a/README.md
++++ b/README.md
+@@ -1,6 +1,6 @@
+ # 淨機 Tidy
+ 
+-給 OPPO（ColorOS，Android 14）的儲存與電池整理工具。設計原則是**只做系統真的允許做的事，並且說清楚哪些做不到**。
++給 OPPO（ColorOS，Android 14 以上）的儲存與電池整理工具。設計原則是**只做系統真的允許做的事，並且說清楚哪些做不到**。
+ 
+ ---
+ 
+@@ -15,6 +15,24 @@
+ 5. 等待約 4～8 分鐘（第一次較久，之後有快取會快很多）。跑完後點進該次執行，頁面最下方 **Artifacts** 區塊會有 `tidy-apk`，下載它。
+ 6. 解壓縮後得到 `app-release.apk`，傳到手機安裝。
+ 
++### 固定簽章（讓新版可以直接覆蓋安裝）
++
++GitHub Actions 每次都在全新的機器上建置，如果沒有設定固定金鑰，每個 APK 的簽章都不一樣，新版就無法覆蓋舊版，只能先解除安裝（回收桶也會一起消失）。
++
++設定一次即可：到 repo 的 **Settings → Secrets and variables → Actions → New repository secret**，新增以下四個 secret：
++
++| 名稱 | 內容 |
++|---|---|
++| `KEYSTORE_BASE64` | 金鑰檔 `.jks` 的 base64 內容（一整行） |
++| `KEYSTORE_PASSWORD` | 金鑰庫密碼 |
++| `KEY_ALIAS` | 金鑰別名 |
++| `KEY_PASSWORD` | 金鑰密碼 |
++
++- **`.jks` 金鑰檔絕對不要上傳到 repo**（`.gitignore` 已排除）。repo 是公開的，金鑰外流代表任何人都能做出可以覆蓋你 App 的假版本。
++- 金鑰檔請另外備份在私人雲端。遺失後就無法再覆蓋安裝。
++- 沒設定 secrets 時仍可建置，只是會改用一次性的 debug 金鑰，Actions 頁面會出現黃色警告。
++- 從舊版（debug 簽章）換到固定簽章時，需要**最後一次**解除安裝後重裝。解除安裝前，請先在首頁把回收桶「全部還原」或「立即清空」。
++
+ ### 手機端安裝
+ ColorOS 會擋來路不明的安裝檔。用檔案管理員點開 APK 時，依提示允許「安裝未知應用程式」即可。
+ 
+@@ -26,14 +44,14 @@ ColorOS 會擋來路不明的安裝檔。用檔案管理員點開 APK 時，依
+ |---|---|---|
+ | 所有檔案存取權 | 掃描共用儲存空間 | 無法掃描，其他功能正常 |
+ | 使用權限存取 | 電池分頁的耗電推估 | 電池分頁只剩基本讀數 |
+-| Shizuku（選配） | 真正清除全機快取、結束背景程序 | 專家模式收起，其餘不受影響 |
++| Shizuku（選配） | 真正清除全機 App 快取 | 專家模式只顯示一行說明，其餘不受影響 |
+ 
+ ### Shizuku 設定（選配）
+ 1. 安裝 Shizuku（Play 商店或 GitHub）。
+ 2. 手機開啟「開發人員選項」→「無線偵錯」。
+ 3. 在 Shizuku App 裡用無線偵錯配對並啟動。
+-4. 回到淨機，首頁「專家模式」按「向 Shizuku 請求授權」。
+-5. **手機重開機後 Shizuku 需要重新啟動**，這是它的運作方式，不是故障。
++4. 回到淨機，首頁「專家模式」會自動偵測到 Shizuku，按「向 Shizuku 請求授權」。
++5. **手機重開機後 Shizuku 需要重新啟動**，這是它的運作方式，不是故障。淨機會顯示「已安裝，尚未啟動」，並提供直接開啟 Shizuku 的按鈕。
+ 
+ ---
+ 
+@@ -41,7 +59,7 @@ ColorOS 會擋來路不明的安裝檔。用檔案管理員點開 APK 時，依
+ 
+ 寫在這裡是因為市面上很多同類 App 不會說：
+ 
+-- **無法終止其他 App 的程序**。Android 8 起就封了。首頁的記憶體數字是真的，但「一鍵加速」在一般權限下只是動畫。要真的做到，只能走 Shizuku。
++- **不提供「結束背景程式」**。一般權限下 Android 8 起就做不到；即使透過 Shizuku 強制結束，系統也會在幾秒內把多數程式重新拉起，反而更耗電。所以淨機刻意不做這件事。
+ - **無法讀取 `/Android/data` 與 `/Android/obb`**。Android 11 起對所有第三方 App 關閉，拿到「所有檔案存取權」也一樣。多數 App 的快取放在這裡，所以清那部分要靠系統對話框或 Shizuku 的 `pm trim-caches`。
+ - **無法讀取各 App 的實際耗電 mAh**。電池分頁用前景使用時間推估，並在畫面上註明。
+ 
+@@ -49,7 +67,11 @@ ColorOS 會擋來路不明的安裝檔。用檔案管理員點開 APK 時，依
+ 
+ ## 四、安全設計
+ 
+-- 刪除的檔案不會立刻消失，而是移到 App 私有目錄的回收桶，保留 **30 天**，隨時可全部還原。
++- 刪除的檔案不會立刻消失，而是移到 App 私有目錄的回收桶，保留 **7 天**，隨時可全部還原。
++- **移到回收桶不會釋出空間**：回收桶和原檔案在同一個儲存空間。只有「清空回收桶」或保留期滿，空間才會真正回來。畫面上的剖面圖會把回收桶單獨標示為「尚未釋出」。
++- **解除安裝淨機會一併清空回收桶**（Android 規定 App 私有目錄隨 App 移除）。
++- `.nomedia`、`.lock` 等標記檔一律不列入清理，避免隱藏的圖片跑進相簿、或干擾正在執行的 App。
++- 重複檔案先比大小、再比檔頭檔尾、最後以完整 SHA-256 確認，不會因為只有部分內容相同而誤判。
+ - 空資料夾沒有資料，直接移除，不進回收桶。
+ - 大型檔案、殘留安裝檔、備份殘留三類**預設不勾選**，需要手動確認。
+ - 每個類別都可以展開看到實際路徑再決定。
+@@ -82,9 +104,10 @@ app/src/main/java/tw/vic/tidy/
+ - **調整判定規則**：`core/JunkScanner.kt` 最上方的 `TEMP_SUFFIXES`、`THUMB_NAMES`、`BACKUP_HINTS`、`BIG_FILE_THRESHOLD`。
+ - **調整配色**：`ui/theme/Theme.kt` 的 `T` 物件。
+ - **調整回收桶保留天數**：`core/RecycleBin.kt` 的 `RETENTION_DAYS`。
++- **調整電池過熱提示溫度**：`core/SystemStats.kt` 的 `HOT_C`。
+ - **改版本號**：`app/build.gradle.kts` 的 `versionCode` / `versionName`。
+ 
+-APK 用 Gradle 自動產生的 debug 金鑰簽章，方便直接安裝。若日後要能覆蓋升級或上架，需要換成自己的 keystore。
++簽章方式見上方「固定簽章」一節。
+ 
+ ---
+ 
+@@ -95,3 +118,22 @@ APK 用 Gradle 自動產生的 debug 金鑰簽章，方便直接安裝。若日
+ - **相依套件下載失敗**：多半是暫時性網路問題，重跑一次 workflow 即可。
+ - **Shizuku 相依失敗**：若 `dev.rikka.shizuku` 抓不到，可先把 `app/build.gradle.kts` 裡那兩行 `implementation("dev.rikka.shizuku:...")` 註解掉，並移除 `core/ShizukuBridge.kt` 與 `AndroidManifest.xml` 中的 provider 區塊；其餘功能不受影響。
+ - **看不到 Artifacts**：只有在建置成功（綠色勾）時才會出現，失敗的執行不會產生檔案。
++
++---
++
++## 版本紀錄
++
++### 1.1
++- 修正：移到回收桶時不再顯示為「已釋出」；剖面圖新增「回收桶（尚未釋出）」色帶，清空回收桶後才計入釋出量。
++- 修正：`.nomedia` 與鎖定檔不再被當成零位元組檔清除。
++- 修正：重複檔案改為三階段比對，最後以完整 SHA-256 確認。
++- 修正：還原時若原路徑已有新檔案，不會覆蓋。
++- 修正：系統「清除全機快取」視窗改用正確的啟動方式，並先確認權限與機型支援。
++- 修正：OPPO 等機型的電流單位判斷。
++- 改進：容量改用 StorageStatsManager 與十進位單位，數字與系統設定一致。
++- 改進：記憶體列的標題、數字與進度條統一表示「使用中」。
++- 改進：Shizuku 區分「未安裝／未啟動／未授權／已連線」四種狀態，啟動後自動更新。
++- 改進：電池顯示充電循環次數（Android 14 以上）與過熱提示。
++- 移除：專家模式的「結束背景 App」。
++- 建置：支援以 GitHub Secrets 提供固定簽章金鑰。
++- 回收桶保留期由 30 天改為 7 天。
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index f2931f6..8b6380c 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -11,18 +11,38 @@ android {
+         applicationId = "tw.vic.tidy"
+         minSdk = 26
+         targetSdk = 34
+-        versionCode = 1
+-        versionName = "1.0"
++        versionCode = 2
++        versionName = "1.1"
++    }
++
++    // A fixed release key, supplied by CI from GitHub Secrets. Every APK
++    // signed with it can be installed over the previous one. Without the
++    // secrets (e.g. a local build) the debug key is used instead — fine for
++    // testing, but each CI runner makes a new debug key, so those APKs can
++    // never update one another.
++    val keystorePath: String? = System.getenv("TIDY_KEYSTORE_PATH")
++    val hasReleaseKey = keystorePath != null && java.io.File(keystorePath).exists()
++
++    signingConfigs {
++        if (hasReleaseKey) {
++            create("release") {
++                storeFile = java.io.File(keystorePath!!)
++                storePassword = System.getenv("TIDY_KEYSTORE_PASSWORD")
++                keyAlias = System.getenv("TIDY_KEY_ALIAS")
++                keyPassword = System.getenv("TIDY_KEY_PASSWORD")
++            }
++        }
+     }
+ 
+     buildTypes {
+         release {
+             isMinifyEnabled = false
+             isShrinkResources = false
+-            // Signed with the auto-generated debug key so the APK installs
+-            // straight from the CI artifact. Replace with your own keystore
+-            // if you ever want a stable upgrade signature.
+-            signingConfig = signingConfigs.getByName("debug")
++            signingConfig = if (hasReleaseKey) {
++                signingConfigs.getByName("release")
++            } else {
++                signingConfigs.getByName("debug")
++            }
+         }
+     }
+ 
+diff --git a/app/src/main/java/tw/vic/tidy/MainActivity.kt b/app/src/main/java/tw/vic/tidy/MainActivity.kt
+index e7dae15..374081d 100644
+--- a/app/src/main/java/tw/vic/tidy/MainActivity.kt
++++ b/app/src/main/java/tw/vic/tidy/MainActivity.kt
+@@ -42,10 +42,20 @@ class MainActivity : ComponentActivity() {
+     private val shizukuListener =
+         Shizuku.OnRequestPermissionResultListener { _, _ -> onShizukuResult?.invoke() }
+ 
++    // Shizuku can start or stop while this screen is open (e.g. the user
++    // switches to Shizuku, starts it, and comes back). These keep the expert
++    // panel in step without needing a manual "re-check".
++    private val binderReceived =
++        Shizuku.OnBinderReceivedListener { onShizukuResult?.invoke() }
++    private val binderDead =
++        Shizuku.OnBinderDeadListener { onShizukuResult?.invoke() }
++
+     override fun onCreate(savedInstanceState: Bundle?) {
+         super.onCreate(savedInstanceState)
+         try {
+             Shizuku.addRequestPermissionResultListener(shizukuListener)
++            Shizuku.addBinderReceivedListenerSticky(binderReceived)
++            Shizuku.addBinderDeadListener(binderDead)
+         } catch (t: Throwable) {
+             // Shizuku is optional; without it the expert panel simply stays closed.
+         }
+@@ -68,6 +78,8 @@ class MainActivity : ComponentActivity() {
+         super.onDestroy()
+         try {
+             Shizuku.removeRequestPermissionResultListener(shizukuListener)
++            Shizuku.removeBinderReceivedListener(binderReceived)
++            Shizuku.removeBinderDeadListener(binderDead)
+         } catch (t: Throwable) {
+             // Already gone.
+         }
+diff --git a/app/src/main/java/tw/vic/tidy/TidyViewModel.kt b/app/src/main/java/tw/vic/tidy/TidyViewModel.kt
+index 032e278..968103a 100644
+--- a/app/src/main/java/tw/vic/tidy/TidyViewModel.kt
++++ b/app/src/main/java/tw/vic/tidy/TidyViewModel.kt
+@@ -38,12 +38,14 @@ data class TidyState(
+     val report: ScanReport? = null,
+     val selected: Set<JunkCategory> = emptySet(),
+     val cleaning: Boolean = false,
++    /** Bytes really released (bin emptied, caches trimmed). */
+     val lastFreed: Long = -1L,
++    /** Bytes moved into the bin by the last clean. Still on disk. */
++    val lastMoved: Long = -1L,
+     val trashBytes: Long = 0L,
+     val trashCount: Int = 0,
+     val usage: List<AppUsage> = emptyList(),
+-    val shizukuInstalled: Boolean = false,
+-    val shizukuGranted: Boolean = false,
++    val shizuku: ShizukuBridge.Status = ShizukuBridge.Status.NOT_INSTALLED,
+     val shellBusy: Boolean = false,
+     val shellOutput: String = "",
+     val notice: String? = null
+@@ -73,7 +75,7 @@ class TidyViewModel(app: Application) : AndroidViewModel(app) {
+     fun refresh() {
+         val ctx = getApplication<Application>()
+         viewModelScope.launch {
+-            val storage = withContext(Dispatchers.IO) { SystemStats.storage() }
++            val storage = withContext(Dispatchers.IO) { SystemStats.storage(ctx) }
+             val ram = SystemStats.ram(ctx)
+             val battery = SystemStats.battery(ctx)
+             val trash = withContext(Dispatchers.IO) { RecycleBin.list(ctx) }
+@@ -86,8 +88,7 @@ class TidyViewModel(app: Application) : AndroidViewModel(app) {
+                     hasUsageAccess = Perms.hasUsageAccess(ctx),
+                     trashBytes = trash.sumOf { e -> e.size },
+                     trashCount = trash.size,
+-                    shizukuInstalled = ShizukuBridge.installed(),
+-                    shizukuGranted = ShizukuBridge.granted()
++                    shizuku = ShizukuBridge.status(ctx)
+                 )
+             }
+         }
+@@ -114,7 +115,7 @@ class TidyViewModel(app: Application) : AndroidViewModel(app) {
+         _state.update {
+             it.copy(
+                 scanning = true, scanProgress = 0f, scanLabel = "準備掃描",
+-                report = null, lastFreed = -1L, selected = emptySet()
++                report = null, lastFreed = -1L, lastMoved = -1L, selected = emptySet()
+             )
+         }
+ 
+@@ -188,13 +189,14 @@ class TidyViewModel(app: Application) : AndroidViewModel(app) {
+         viewModelScope.launch(Dispatchers.IO) {
+             val outcome = RecycleBin.remove(ctx, items)
+             val message = buildString {
+-                append("已移到回收桶 ${outcome.movedCount} 項")
+-                if (outcome.failedCount > 0) append("，${outcome.failedCount} 項無法移除")
++                append("已移到回收桶 ${outcome.movedCount} 項，清空回收桶後才會釋出空間")
++                if (outcome.failedCount > 0) append("；${outcome.failedCount} 項無法移除")
+             }
+             _state.update {
+                 it.copy(
+                     cleaning = false,
+-                    lastFreed = outcome.freedBytes,
++                    lastMoved = outcome.freedBytes,
++                    lastFreed = -1L,
+                     report = null,
+                     selected = emptySet(),
+                     notice = message
+@@ -207,8 +209,14 @@ class TidyViewModel(app: Application) : AndroidViewModel(app) {
+     fun emptyTrash() {
+         val ctx = getApplication<Application>()
+         viewModelScope.launch(Dispatchers.IO) {
+-            RecycleBin.emptyNow(ctx)
+-            _state.update { it.copy(notice = "回收桶已清空") }
++            val freed = RecycleBin.emptyNow(ctx)
++            _state.update {
++                it.copy(
++                    lastFreed = freed,
++                    lastMoved = -1L,
++                    notice = "回收桶已清空，釋出 ${formatBytes(freed)}"
++                )
++            }
+             refresh()
+         }
+     }
+@@ -222,35 +230,64 @@ class TidyViewModel(app: Application) : AndroidViewModel(app) {
+         }
+     }
+ 
+-    // ---- Expert mode --------------------------------------------------
++    // ---- System cache dialog -----------------------------------------
+ 
+-    fun refreshShizuku() {
+-        _state.update {
+-            it.copy(
+-                shizukuInstalled = ShizukuBridge.installed(),
+-                shizukuGranted = ShizukuBridge.granted()
+-            )
++    private var freeBeforeSystemClear = -1L
++
++    /** Call right before launching the system "clear all caches" dialog. */
++    fun beginSystemCacheClear() {
++        freeBeforeSystemClear = _state.value.storage.free
++    }
++
++    fun onSystemCacheResult(confirmed: Boolean) {
++        val ctx = getApplication<Application>()
++        val before = freeBeforeSystemClear
++        freeBeforeSystemClear = -1L
++        if (!confirmed) return
++        viewModelScope.launch {
++            val after = withContext(Dispatchers.IO) { SystemStats.storage(ctx) }
++            val gained = if (before >= 0) after.free - before else 0L
++            _state.update {
++                it.copy(
++                    storage = after,
++                    lastFreed = if (gained > 0) gained else it.lastFreed,
++                    notice = if (gained > 0) "系統已清除快取，釋出 ${formatBytes(gained)}"
++                    else "系統已清除快取"
++                )
++            }
+         }
+     }
+ 
+-    fun trimAllCaches() = runShell("清除全機 App 快取") { ShizukuBridge.trimAllCaches() }
++    // ---- Expert mode --------------------------------------------------
+ 
+-    fun killBackgroundApps() = runShell("結束背景 App") { ShizukuBridge.killBackgroundApps() }
++    fun refreshShizuku() {
++        val ctx = getApplication<Application>()
++        _state.update { it.copy(shizuku = ShizukuBridge.status(ctx)) }
++    }
+ 
+-    private fun runShell(label: String, block: () -> ShizukuBridge.ShellResult) {
++    fun trimAllCaches() {
++        val ctx = getApplication<Application>()
+         if (_state.value.shellBusy) return
++        val label = "清除全機 App 快取"
+         _state.update { it.copy(shellBusy = true, shellOutput = "$label…") }
+         viewModelScope.launch(Dispatchers.IO) {
+-            val before = SystemStats.ram(getApplication())
+-            val result = block()
+-            val after = SystemStats.ram(getApplication())
+-            val gained = after.avail - before.avail
++            // Measure what matters for a cache trim: disk space, not RAM.
++            val before = SystemStats.storage(ctx).free
++            val result = ShizukuBridge.trimAllCaches()
++            val after = SystemStats.storage(ctx).free
++            val gained = after - before
+             val text = when {
+                 result.exitCode != 0 -> "$label 失敗：${result.output}"
+-                gained > 0 -> "$label 完成，記憶體多出 ${formatBytes(gained)}"
+-                else -> "$label 完成"
++                gained > 0 -> "$label 完成，釋出 ${formatBytes(gained)}"
++                else -> "$label 完成，目前沒有可釋出的快取"
++            }
++            _state.update {
++                it.copy(
++                    shellBusy = false,
++                    shellOutput = text,
++                    lastFreed = if (gained > 0 && result.exitCode == 0) gained else it.lastFreed
++                )
+             }
+-            _state.update { it.copy(shellBusy = false, shellOutput = text) }
+             refresh()
+         }
+     }
+diff --git a/app/src/main/java/tw/vic/tidy/core/Fmt.kt b/app/src/main/java/tw/vic/tidy/core/Fmt.kt
+index 843f582..7f189e8 100644
+--- a/app/src/main/java/tw/vic/tidy/core/Fmt.kt
++++ b/app/src/main/java/tw/vic/tidy/core/Fmt.kt
+@@ -2,13 +2,18 @@ package tw.vic.tidy.core
+ 
+ import java.util.Locale
+ 
++/**
++ * Decimal units (1 GB = 1,000,000,000 bytes), the same convention Android's
++ * own Settings and the box on the phone use. Binary units made a 256 GB phone
++ * read as "238 GB" and looked like a bug.
++ */
+ fun formatBytes(bytes: Long): String {
+-    if (bytes < 1024) return "$bytes B"
+-    val kb = bytes / 1024.0
+-    if (kb < 1024) return String.format(Locale.US, "%.0f KB", kb)
+-    val mb = kb / 1024.0
+-    if (mb < 1024) return String.format(Locale.US, if (mb < 10) "%.1f MB" else "%.0f MB", mb)
+-    val gb = mb / 1024.0
++    if (bytes < 1000) return "$bytes B"
++    val kb = bytes / 1000.0
++    if (kb < 1000) return String.format(Locale.US, "%.0f KB", kb)
++    val mb = kb / 1000.0
++    if (mb < 1000) return String.format(Locale.US, if (mb < 10) "%.1f MB" else "%.0f MB", mb)
++    val gb = mb / 1000.0
+     return String.format(Locale.US, "%.2f GB", gb)
+ }
+ 
+diff --git a/app/src/main/java/tw/vic/tidy/core/JunkScanner.kt b/app/src/main/java/tw/vic/tidy/core/JunkScanner.kt
+index 067d60f..173bc08 100644
+--- a/app/src/main/java/tw/vic/tidy/core/JunkScanner.kt
++++ b/app/src/main/java/tw/vic/tidy/core/JunkScanner.kt
+@@ -23,7 +23,7 @@ enum class JunkCategory(
+     ),
+     ZERO_BYTE(
+         "零位元組檔",
+-        "大小為 0、寫入中斷留下的空殼檔",
++        "大小為 0、寫入中斷留下的空殼檔。.nomedia 等標記檔不會列入",
+         true
+     ),
+     THUMBS(
+@@ -43,7 +43,7 @@ enum class JunkCategory(
+     ),
+     DUPLICATE(
+         "重複檔案",
+-        "內容相同的副本，最早的一份會保留",
++        "逐位元組雜湊確認內容完全相同的副本，最早的一份會保留",
+         false
+     ),
+     BIG_FILE(
+@@ -90,6 +90,15 @@ object JunkScanner {
+         "/lost.dir", "/backup", "/backups", "/.estrongs", "/.bak",
+         "/oppo/backup", "/coloros/backup", "/.trashed"
+     )
++    /**
++     * Zero-byte files that are meaningful by their mere existence. Deleting
++     * .nomedia makes every hidden image in that folder (LINE stickers, app
++     * caches, private albums) flood the gallery; lock files belong to apps
++     * that are running right now.
++     */
++    private val MARKER_FILES = setOf(".nomedia", ".gitkeep", ".keep")
++    private val LOCK_SUFFIXES = listOf(".lock", ".lck")
++
+     private const val BIG_FILE_THRESHOLD = 200L * 1024 * 1024
+     private const val DUPLICATE_MIN_SIZE = 1L * 1024 * 1024
+     private const val MAX_DEPTH = 24
+@@ -155,6 +164,9 @@ object JunkScanner {
+                 val lowerPath = path.lowercase()
+ 
+                 when {
++                    lower in MARKER_FILES || LOCK_SUFFIXES.any { lower.endsWith(it) } ->
++                        Unit // Never a candidate, whatever its size.
++
+                     size == 0L ->
+                         zero.add(JunkItem(path, 0L, false))
+ 
+@@ -206,7 +218,13 @@ object JunkScanner {
+         )
+     }
+ 
+-    /** Groups by size first, then fingerprints only the groups that collide. */
++    /**
++     * Three passes, each cheaper than the next and run only on what survived
++     * the last: same size → same head/tail fingerprint → same full SHA-256.
++     * The fingerprint alone could call two same-size videos identical when
++     * only their middle differs; since the result gets deleted, every match
++     * is confirmed over the whole file.
++     */
+     private fun findDuplicates(
+         candidates: List<File>,
+         shouldContinue: () -> Boolean
+@@ -221,12 +239,21 @@ object JunkScanner {
+                 val fp = fingerprint(f) ?: continue
+                 byHash.getOrPut(fp) { mutableListOf() }.add(f)
+             }
+-            for ((_, same) in byHash) {
+-                if (same.size < 2) continue
+-                // Keep the oldest copy; everything newer is the duplicate.
+-                val sorted = same.sortedBy { it.lastModified() }
+-                for (dup in sorted.drop(1)) {
+-                    out.add(JunkItem(dup.absolutePath, dup.length(), false))
++            for ((_, quick) in byHash) {
++                if (quick.size < 2) continue
++                val byFull = mutableMapOf<String, MutableList<File>>()
++                for (f in quick) {
++                    if (!shouldContinue()) break
++                    val h = fullHash(f) ?: continue
++                    byFull.getOrPut(h) { mutableListOf() }.add(f)
++                }
++                for ((_, same) in byFull) {
++                    if (same.size < 2) continue
++                    // Keep the oldest copy; everything newer is the duplicate.
++                    val sorted = same.sortedBy { it.lastModified() }
++                    for (dup in sorted.drop(1)) {
++                        out.add(JunkItem(dup.absolutePath, dup.length(), false))
++                    }
+                 }
+             }
+         }
+@@ -253,6 +280,21 @@ object JunkScanner {
+         null
+     }
+ 
++    private fun fullHash(f: File): String? = try {
++        val md = MessageDigest.getInstance("SHA-256")
++        val buf = ByteArray(256 * 1024)
++        f.inputStream().use { input ->
++            while (true) {
++                val n = input.read(buf)
++                if (n < 0) break
++                md.update(buf, 0, n)
++            }
++        }
++        md.digest().joinToString("") { String.format("%02x", it) }
++    } catch (t: Throwable) {
++        null
++    }
++
+     /** Sandboxed app storage is off limits on Android 11+, so don't descend. */
+     private fun isBlockedDir(path: String, root: File): Boolean {
+         val rel = path.removePrefix(root.absolutePath).lowercase()
+diff --git a/app/src/main/java/tw/vic/tidy/core/Perms.kt b/app/src/main/java/tw/vic/tidy/core/Perms.kt
+index ad0230a..a3c4fd6 100644
+--- a/app/src/main/java/tw/vic/tidy/core/Perms.kt
++++ b/app/src/main/java/tw/vic/tidy/core/Perms.kt
+@@ -74,12 +74,24 @@ object Perms {
+ 
+     // ---- System-provided cleanup entry points -------------------------
+ 
+-    /** Android 12+ shows a system dialog that clears cached data for every app. */
+-    fun canUseSystemCacheDialog(): Boolean =
+-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
++    /**
++     * Android 12+ has a system dialog that clears cached data for every app.
++     * Three conditions, all required:
++     *  - Android 12 or later;
++     *  - the caller holds "All files access" (otherwise the system refuses
++     *    silently, which is why the button used to appear to do nothing);
++     *  - the ROM actually ships the dialog (some vendor builds remove it).
++     */
++    fun systemCacheDialogSupported(context: Context): Boolean =
++        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
++            systemCacheIntent().resolveActivity(context.packageManager) != null
+ 
+-    fun openSystemCacheDialog(context: Context): Boolean =
+-        start(context, Intent(ACTION_CLEAR_APP_CACHE))
++    /**
++     * Must be launched with startActivityForResult (an ActivityResultLauncher),
++     * not startActivity + FLAG_ACTIVITY_NEW_TASK: the system checks the calling
++     * activity and returns RESULT_OK only after the user confirms.
++     */
++    fun systemCacheIntent(): Intent = Intent(ACTION_CLEAR_APP_CACHE)
+ 
+     fun openStorageManager(context: Context) {
+         if (!start(context, Intent(ACTION_MANAGE_STORAGE))) {
+diff --git a/app/src/main/java/tw/vic/tidy/core/RecycleBin.kt b/app/src/main/java/tw/vic/tidy/core/RecycleBin.kt
+index 6450977..03d8e63 100644
+--- a/app/src/main/java/tw/vic/tidy/core/RecycleBin.kt
++++ b/app/src/main/java/tw/vic/tidy/core/RecycleBin.kt
+@@ -7,12 +7,20 @@ import java.io.File
+ 
+ /**
+  * Nothing is deleted outright. Files are moved into app-private storage and
+- * kept for 30 days, so a wrong tick is recoverable. Empty folders are the one
+- * exception — there is no data in them to lose.
++ * kept for RETENTION_DAYS, so a wrong tick is recoverable. Empty folders are
++ * the one exception — there is no data in them to lose.
++ *
++ * Important: the bin lives on the same volume as the files it holds, so
++ * moving something into it frees NO space. Space comes back only when the
++ * bin is emptied or an entry expires. The UI must say so, and only
++ * emptyNow()/purgeExpired() may be reported as "freed".
++ *
++ * The bin is also deleted with the app. Uninstalling = emptying.
+  */
+ object RecycleBin {
+ 
+-    const val RETENTION_DAYS = 30
++    /** Short on purpose: a long hold means a long wait for the space. */
++    const val RETENTION_DAYS = 7
+     private const val RETENTION_MS = RETENTION_DAYS * 24L * 60 * 60 * 1000
+ 
+     data class Entry(
+@@ -133,6 +141,8 @@ object RecycleBin {
+         val stored = File(binDir(context), entry.storedName)
+         if (!stored.exists()) return false
+         val target = File(entry.originalPath)
++        // A new file now sits at the old path; never overwrite it.
++        if (target.exists()) return false
+         target.parentFile?.let { if (!it.exists()) it.mkdirs() }
+         val ok = try {
+             stored.renameTo(target) || copyThenDelete(stored, target)
+@@ -158,9 +168,16 @@ object RecycleBin {
+         save(context, keep)
+     }
+ 
+-    fun emptyNow(context: Context) {
+-        list(context).forEach { File(binDir(context), it.storedName).delete() }
++    /** Deletes everything in the bin. Returns the bytes actually released. */
++    fun emptyNow(context: Context): Long {
++        var freed = 0L
++        list(context).forEach {
++            val f = File(binDir(context), it.storedName)
++            val size = f.length()
++            if (f.delete()) freed += size
++        }
+         save(context, emptyList())
++        return freed
+     }
+ 
+     private fun copyThenDelete(src: File, dest: File): Boolean = try {
+diff --git a/app/src/main/java/tw/vic/tidy/core/ShizukuBridge.kt b/app/src/main/java/tw/vic/tidy/core/ShizukuBridge.kt
+index 494ae59..58e35ef 100644
+--- a/app/src/main/java/tw/vic/tidy/core/ShizukuBridge.kt
++++ b/app/src/main/java/tw/vic/tidy/core/ShizukuBridge.kt
+@@ -1,34 +1,53 @@
+ package tw.vic.tidy.core
+ 
++import android.content.Context
++import android.content.Intent
+ import android.content.pm.PackageManager
++import android.net.Uri
+ import rikka.shizuku.Shizuku
+ 
+ /**
+  * Expert mode. When Shizuku is running and has granted this app permission,
+- * commands run with ADB-level rights — which is the only way, without root,
+- * to actually trim other apps' caches or stop their background processes.
++ * commands run with ADB-level rights — the only way, without root, to trim
++ * other apps' caches.
+  *
+- * Everything here is wrapped: if Shizuku is not installed the class simply
+- * reports "unavailable" and the rest of the app carries on.
++ * Everything here is wrapped: without Shizuku the class reports a status and
++ * the rest of the app carries on.
+  */
+ object ShizukuBridge {
+ 
+     const val REQUEST_CODE = 4919
++    private const val SHIZUKU_PKG = "moe.shizuku.privileged.api"
++    private const val SHIZUKU_HOME = "https://shizuku.rikka.app/"
+ 
+-    fun installed(): Boolean = try {
+-        Shizuku.pingBinder()
++    /**
++     * Four distinct situations, each needing a different next step from the
++     * user. pingBinder() alone only tells "running or not", so "not installed"
++     * and "installed but stopped" (e.g. after a reboot) used to look the same.
++     */
++    enum class Status { NOT_INSTALLED, NOT_RUNNING, NOT_GRANTED, READY }
++
++    fun status(context: Context): Status = when {
++        !running() -> if (appInstalled(context)) Status.NOT_RUNNING else Status.NOT_INSTALLED
++        !granted() -> Status.NOT_GRANTED
++        else -> Status.READY
++    }
++
++    private fun appInstalled(context: Context): Boolean = try {
++        context.packageManager.getPackageInfo(SHIZUKU_PKG, 0)
++        true
+     } catch (t: Throwable) {
+         false
+     }
+ 
+-    fun granted(): Boolean = try {
+-        installed() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
++    private fun running(): Boolean = try {
++        Shizuku.pingBinder()
+     } catch (t: Throwable) {
+         false
+     }
+ 
+-    fun shouldShowRationale(): Boolean = try {
+-        installed() && Shizuku.shouldShowRequestPermissionRationale()
++    fun granted(): Boolean = try {
++        running() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+     } catch (t: Throwable) {
+         false
+     }
+@@ -37,7 +56,32 @@ object ShizukuBridge {
+         try {
+             Shizuku.requestPermission(REQUEST_CODE)
+         } catch (t: Throwable) {
+-            // Nothing to do — the caller already checked installed().
++            // Nothing to do — the panel only offers this when Shizuku is running.
++        }
++    }
++
++    /** Opens the Shizuku app so the user can start it over wireless debugging. */
++    fun openApp(context: Context): Boolean = try {
++        val i = context.packageManager.getLaunchIntentForPackage(SHIZUKU_PKG)
++        if (i == null) {
++            false
++        } else {
++            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++            context.startActivity(i)
++            true
++        }
++    } catch (t: Throwable) {
++        false
++    }
++
++    fun openDownloadPage(context: Context) {
++        try {
++            context.startActivity(
++                Intent(Intent.ACTION_VIEW, Uri.parse(SHIZUKU_HOME))
++                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++            )
++        } catch (t: Throwable) {
++            // No browser; nothing sensible to fall back to.
+         }
+     }
+ 
+@@ -70,9 +114,14 @@ object ShizukuBridge {
+         }
+     }
+ 
+-    /** Clears cached data for every installed app. */
+-    fun trimAllCaches(): ShellResult = exec("pm trim-caches 999999999999")
+-
+-    /** Ends background processes. Foreground apps are left alone by the system. */
+-    fun killBackgroundApps(): ShellResult = exec("am kill-all")
++    /**
++     * Asks the system to free cache space up to a target far larger than the
++     * disk, which in practice clears every app's cache. Accounts, settings
++     * and user data are untouched.
++     *
++     * "End background apps" (am kill-all) was removed on purpose: Android
++     * restarts most of those processes within seconds, which costs battery,
++     * and it contradicted the app's own "high RAM use is not slowness" note.
++     */
++    fun trimAllCaches(): ShellResult = exec("pm trim-caches 999999999999999")
+ }
+diff --git a/app/src/main/java/tw/vic/tidy/core/SystemStats.kt b/app/src/main/java/tw/vic/tidy/core/SystemStats.kt
+index 02e76a1..f7d4e56 100644
+--- a/app/src/main/java/tw/vic/tidy/core/SystemStats.kt
++++ b/app/src/main/java/tw/vic/tidy/core/SystemStats.kt
+@@ -1,6 +1,7 @@
+ package tw.vic.tidy.core
+ 
+ import android.app.ActivityManager
++import android.app.usage.StorageStatsManager
+ import android.content.Context
+ import android.content.Intent
+ import android.content.IntentFilter
+@@ -8,6 +9,8 @@ import android.os.BatteryManager
+ import android.os.Build
+ import android.os.Environment
+ import android.os.StatFs
++import android.os.storage.StorageManager
++import kotlin.math.abs
+ 
+ data class StorageInfo(val total: Long, val free: Long) {
+     val used: Long get() = total - free
+@@ -24,16 +27,35 @@ data class BatteryInfo(
+     val status: String,
+     val health: String,
+     val plugged: String,
+-    val currentMa: Int
++    /** Absolute value in mA; 0 when the device reports nothing usable. */
++    val currentMa: Int,
++    /** Charge cycles, Android 14+. -1 when unavailable. */
++    val cycleCount: Int
+ )
+ 
+ object SystemStats {
+ 
+-    fun storage(): StorageInfo = try {
+-        val stat = StatFs(Environment.getExternalStorageDirectory().absolutePath)
+-        StorageInfo(stat.totalBytes, stat.availableBytes)
++    /** Battery temperature at or above this is shown as a warning. */
++    const val HOT_C = 40f
++
++    /**
++     * StorageStatsManager reports the whole device (system partition included)
++     * and rounds total capacity to the advertised size, so the numbers match
++     * Settings. StatFs only sees the data partition; it stays as a fallback.
++     */
++    fun storage(context: Context): StorageInfo = try {
++        val ssm = context.getSystemService(Context.STORAGE_STATS_SERVICE) as StorageStatsManager
++        StorageInfo(
++            ssm.getTotalBytes(StorageManager.UUID_DEFAULT),
++            ssm.getFreeBytes(StorageManager.UUID_DEFAULT)
++        )
+     } catch (t: Throwable) {
+-        StorageInfo(0L, 0L)
++        try {
++            val stat = StatFs(Environment.getExternalStorageDirectory().absolutePath)
++            StorageInfo(stat.totalBytes, stat.availableBytes)
++        } catch (t2: Throwable) {
++            StorageInfo(0L, 0L)
++        }
+     }
+ 
+     fun ram(context: Context): RamInfo = try {
+@@ -77,16 +99,35 @@ object SystemStats {
+             else -> "未接電源"
+         }
+ 
+-        var currentMa = 0
+-        try {
+-            val bm = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+-            val micro = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
+-            currentMa = micro / 1000
+-        } catch (t: Throwable) {
+-            // Some vendors report nothing here; the field is simply hidden.
++        val cycles = if (Build.VERSION.SDK_INT >= 34) {
++            // BatteryManager.EXTRA_CYCLE_COUNT, spelled out so it compiles on any SDK.
++            intent?.getIntExtra("android.os.extra.CYCLE_COUNT", -1) ?: -1
++        } else {
++            -1
+         }
+ 
+-        return BatteryInfo(pct, temp, volt, statusText, healthText, pluggedText, currentMa)
++        return BatteryInfo(
++            pct, temp, volt, statusText, healthText, pluggedText,
++            currentMa(context), cycles
++        )
++    }
++
++    /**
++     * The API says microamps, but several vendors (OPPO among them) report
++     * milliamps. A phone never draws 20 A, so anything above 20,000 must be
++     * µA; anything below is taken as mA. The sign also differs by vendor,
++     * so only the magnitude is returned and the status text gives direction.
++     */
++    private fun currentMa(context: Context): Int = try {
++        val bm = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
++        val raw = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW)
++        when {
++            raw == Int.MIN_VALUE || raw == 0 -> 0
++            abs(raw) > 20_000 -> abs(raw) / 1000
++            else -> abs(raw)
++        }
++    } catch (t: Throwable) {
++        0
+     }
+ 
+     fun deviceName(): String = "${Build.MANUFACTURER} ${Build.MODEL}".trim()
+diff --git a/app/src/main/java/tw/vic/tidy/ui/BatteryScreen.kt b/app/src/main/java/tw/vic/tidy/ui/BatteryScreen.kt
+index 91f4e9c..236f10d 100644
+--- a/app/src/main/java/tw/vic/tidy/ui/BatteryScreen.kt
++++ b/app/src/main/java/tw/vic/tidy/ui/BatteryScreen.kt
+@@ -24,6 +24,7 @@ import tw.vic.tidy.TidyState
+ import tw.vic.tidy.TidyViewModel
+ import tw.vic.tidy.core.AppUsage
+ import tw.vic.tidy.core.Perms
++import tw.vic.tidy.core.SystemStats
+ import tw.vic.tidy.core.formatDuration
+ import tw.vic.tidy.ui.components.Divider1
+ import tw.vic.tidy.ui.components.Eyebrow
+@@ -67,15 +68,22 @@ fun BatteryScreen(vm: TidyViewModel, state: TidyState) {
+                 Divider1()
+                 Reading("電源", b.plugged)
+                 Divider1()
+-                Reading("溫度", "${b.tempC} °C")
++                Reading(
++                    "溫度",
++                    "${b.tempC} °C" + if (b.tempC >= SystemStats.HOT_C) "（偏熱）" else ""
++                )
+                 Divider1()
+                 Reading("電壓", "${b.voltageMv} mV")
+                 if (b.currentMa != 0) {
+                     Divider1()
+-                    Reading("即時電流", "${b.currentMa} mA")
++                    Reading("即時電流", "${b.currentMa} mA（${b.status}）")
+                 }
+                 Divider1()
+                 Reading("健康度", b.health)
++                if (b.cycleCount >= 0) {
++                    Divider1()
++                    Reading("充電循環", "${b.cycleCount} 次")
++                }
+             }
+         }
+ 
+diff --git a/app/src/main/java/tw/vic/tidy/ui/CleanScreen.kt b/app/src/main/java/tw/vic/tidy/ui/CleanScreen.kt
+index 731db85..609f7c7 100644
+--- a/app/src/main/java/tw/vic/tidy/ui/CleanScreen.kt
++++ b/app/src/main/java/tw/vic/tidy/ui/CleanScreen.kt
+@@ -127,7 +127,8 @@ fun CleanScreen(vm: TidyViewModel, state: TidyState) {
+             text = {
+                 Text(
+                     "${state.selectedItems.size} 個項目會移到回收桶，保留 " +
+-                        "${RecycleBin.RETENTION_DAYS} 天後才真正刪除。" +
++                        "${RecycleBin.RETENTION_DAYS} 天後才真正刪除。\n\n" +
++                        "移動後檔案仍佔用空間；要立刻釋出，請到首頁清空回收桶。" +
+                         "空資料夾沒有資料，會直接移除。",
+                     style = Ty.Body
+                 )
+@@ -156,15 +157,24 @@ private fun EmptyClean(state: TidyState, onScan: () -> Unit) {
+         verticalArrangement = Arrangement.Center
+     ) {
+         Text(
+-            if (state.lastFreed > 0) "清理完成" else "還沒有掃描結果",
++            when {
++                state.lastMoved > 0 -> "已移到回收桶"
++                state.lastFreed > 0 -> "清理完成"
++                else -> "還沒有掃描結果"
++            },
+             style = Ty.Display.copy(fontSize = 28.sp)
+         )
+         Spacer(Modifier.height(10.dp))
+         Text(
+-            if (state.lastFreed > 0)
+-                "這次釋出 ${formatBytes(state.lastFreed)}。再掃一次可以確認還有沒有殘留。"
+-            else
+-                "掃描會逐一讀取共用儲存空間的檔案清單，過程中不會刪除任何東西。",
++            when {
++                state.lastMoved > 0 ->
++                    "共 ${formatBytes(state.lastMoved)} 移入回收桶。檔案還在同一個儲存空間，" +
++                        "到首頁清空回收桶才會真正釋出；${RecycleBin.RETENTION_DAYS} 天後也會自動清除。"
++                state.lastFreed > 0 ->
++                    "這次釋出 ${formatBytes(state.lastFreed)}。再掃一次可以確認還有沒有殘留。"
++                else ->
++                    "掃描會逐一讀取共用儲存空間的檔案清單，過程中不會刪除任何東西。"
++            },
+             style = Ty.BodyDim
+         )
+         Spacer(Modifier.height(20.dp))
+diff --git a/app/src/main/java/tw/vic/tidy/ui/HomeScreen.kt b/app/src/main/java/tw/vic/tidy/ui/HomeScreen.kt
+index 2fec1de..6cbe41c 100644
+--- a/app/src/main/java/tw/vic/tidy/ui/HomeScreen.kt
++++ b/app/src/main/java/tw/vic/tidy/ui/HomeScreen.kt
+@@ -1,5 +1,8 @@
+ package tw.vic.tidy.ui
+ 
++import android.app.Activity
++import androidx.activity.compose.rememberLauncherForActivityResult
++import androidx.activity.result.contract.ActivityResultContracts
+ import androidx.compose.animation.core.animateFloatAsState
+ import androidx.compose.foundation.layout.Column
+ import androidx.compose.foundation.layout.Row
+@@ -24,6 +27,7 @@ import androidx.compose.ui.unit.dp
+ import tw.vic.tidy.TidyState
+ import tw.vic.tidy.TidyViewModel
+ import tw.vic.tidy.core.Perms
++import tw.vic.tidy.core.RecycleBin
+ import tw.vic.tidy.core.ShizukuBridge
+ import tw.vic.tidy.core.SystemStats
+ import tw.vic.tidy.core.formatBytes
+@@ -50,11 +54,19 @@ fun HomeScreen(vm: TidyViewModel, state: TidyState, onGoClean: () -> Unit) {
+ 
+     LaunchedEffect(Unit) { vm.refresh() }
+ 
++    val cacheLauncher = rememberLauncherForActivityResult(
++        ActivityResultContracts.StartActivityForResult()
++    ) { result -> vm.onSystemCacheResult(result.resultCode == Activity.RESULT_OK) }
++
+     val reclaimable = state.report?.totalBytes ?: 0L
+-    val usedOther = (state.storage.used - reclaimable).coerceAtLeast(0L)
++    // Files in the bin still occupy the disk; show them as their own band so
++    // "moved" never looks like "freed".
++    val inBin = state.trashBytes
++    val usedOther = (state.storage.used - reclaimable - inBin).coerceAtLeast(0L)
+     val strata = listOf(
+         Stratum("已使用", usedOther, T.Slate),
+         Stratum("可回收", reclaimable, T.Brass, reclaimable = true),
++        Stratum("回收桶（尚未釋出）", inBin, T.BrassDeep, reclaimable = true),
+         Stratum("可用空間", state.storage.free, FreeBand)
+     )
+ 
+@@ -124,21 +136,25 @@ fun HomeScreen(vm: TidyViewModel, state: TidyState, onGoClean: () -> Unit) {
+         Spacer(Modifier.height(6.dp))
+         Panel {
+             val ram = state.ram
++            // Title, number and meter all describe the same thing: memory in use.
+             StatLine(
+                 label = "記憶體",
+-                value = formatBytes(ram.avail) + " 可用",
+-                detail = "共 ${formatBytes(ram.total)}。Android 會自行回收背景程式，佔用高不等於變慢。",
++                value = formatBytes(ram.used) + " 使用中",
++                detail = "可用 ${formatBytes(ram.avail)}，共 ${formatBytes(ram.total)}。" +
++                    "Android 會自行回收背景程式，佔用高不等於變慢。",
+                 fraction = if (ram.total > 0) ram.used.toFloat() / ram.total else 0f,
+                 color = T.Steel
+             )
+             Divider1()
+             state.battery?.let { b ->
++                val hot = b.tempC >= SystemStats.HOT_C
+                 StatLine(
+                     label = "電池",
+                     value = "${b.level}%",
+-                    detail = "${b.status} · ${b.tempC} °C · 健康度 ${b.health}",
++                    detail = "${b.status} · ${b.tempC} °C" + (if (hot) "（偏熱）" else "") +
++                        " · 健康度 ${b.health}",
+                     fraction = b.level / 100f,
+-                    color = if (b.level < 20) T.Clay else T.Jade
++                    color = if (b.level < 20 || hot) T.Clay else T.Jade
+                 )
+             }
+         }
+@@ -147,12 +163,27 @@ fun HomeScreen(vm: TidyViewModel, state: TidyState, onGoClean: () -> Unit) {
+         Eyebrow("交給系統處理")
+         Spacer(Modifier.height(6.dp))
+         Panel {
+-            if (Perms.canUseSystemCacheDialog()) {
+-                HandoffRow(
+-                    title = "清除全機 App 快取",
+-                    detail = "由系統跳出確認視窗，一次清掉所有 App 的快取資料",
+-                    actionLabel = "開啟"
+-                ) { Perms.openSystemCacheDialog(context) }
++            if (Perms.systemCacheDialogSupported(context)) {
++                if (state.hasAllFiles) {
++                    HandoffRow(
++                        title = "清除全機 App 快取",
++                        detail = "由系統跳出確認視窗，一次清掉所有 App 的快取資料",
++                        actionLabel = "開啟"
++                    ) {
++                        vm.beginSystemCacheClear()
++                        try {
++                            cacheLauncher.launch(Perms.systemCacheIntent())
++                        } catch (t: Throwable) {
++                            vm.onSystemCacheResult(false)
++                        }
++                    }
++                } else {
++                    HandoffRow(
++                        title = "清除全機 App 快取",
++                        detail = "系統要求先開啟「所有檔案存取權」才能使用",
++                        actionLabel = "授權"
++                    ) { Perms.requestAllFiles(context) }
++                }
+                 Divider1()
+             }
+             HandoffRow(
+@@ -175,7 +206,11 @@ fun HomeScreen(vm: TidyViewModel, state: TidyState, onGoClean: () -> Unit) {
+                     style = Ty.Title
+                 )
+                 Spacer(Modifier.height(6.dp))
+-                Text("移除的檔案會保留 30 天，期間隨時可以放回原位。", style = Ty.Caption)
++                Text(
++                    "移除的檔案會保留 ${RecycleBin.RETENTION_DAYS} 天，期間隨時可以放回原位。" +
++                        "這些檔案仍佔用同一個儲存空間，清空後才會真正釋出；解除安裝淨機也會一併清空。",
++                    style = Ty.Caption
++                )
+                 Spacer(Modifier.height(10.dp))
+                 Row(verticalAlignment = Alignment.CenterVertically) {
+                     QuietAction("全部還原") { vm.restoreTrash() }
+@@ -212,55 +247,67 @@ private fun HeadlineNumber(state: TidyState, reclaimable: Long) {
+         if (state.lastFreed > 0) {
+             Spacer(Modifier.height(6.dp))
+             Text(
+-                "上次清理釋出 ${formatBytes(state.lastFreed)}",
++                "剛才釋出 ${formatBytes(state.lastFreed)}",
+                 style = Ty.Caption.copy(color = T.Jade)
+             )
++        } else if (state.lastMoved > 0) {
++            Spacer(Modifier.height(6.dp))
++            Text(
++                "已將 ${formatBytes(state.lastMoved)} 移入回收桶，清空後才會釋出空間",
++                style = Ty.Caption.copy(color = T.Brass)
++            )
+         }
+     }
+ }
+ 
+ @Composable
+ private fun ExpertPanel(vm: TidyViewModel, state: TidyState) {
+-    Eyebrow("專家模式")
++    val context = LocalContext.current
++    Eyebrow("專家模式（選配）")
+     Spacer(Modifier.height(6.dp))
+     Panel {
+-        when {
+-            !state.shizukuInstalled -> {
+-                Text("未偵測到 Shizuku", style = Ty.Title)
++        when (state.shizuku) {
++            ShizukuBridge.Status.NOT_INSTALLED -> {
++                // Kept short: most people never need this, so it should not
++                // take up a whole screen.
++                Text(
++                    "安裝 Shizuku 後，可以真正清除全機 App 快取。不裝也不影響其他功能。",
++                    style = Ty.Caption
++                )
++                Spacer(Modifier.height(4.dp))
++                QuietAction("取得 Shizuku") { ShizukuBridge.openDownloadPage(context) }
++            }
++
++            ShizukuBridge.Status.NOT_RUNNING -> {
++                Text("Shizuku 已安裝，尚未啟動", style = Ty.Title)
+                 Spacer(Modifier.height(8.dp))
+                 Text(
+-                    "一般 App 無法終止其他程式，也碰不到別人的快取。裝上 Shizuku 並用無線偵錯啟動後，" +
+-                        "這裡就能真的執行清理。沒有它，其餘功能照常運作。",
++                    "開啟 Shizuku，用「無線偵錯」啟動。手機重開機後需要再啟動一次，這是正常的。" +
++                        "啟動後回到這裡會自動更新。",
+                     style = Ty.Caption
+                 )
+-                Spacer(Modifier.height(10.dp))
+-                QuietAction("重新偵測") { vm.refreshShizuku() }
++                Spacer(Modifier.height(12.dp))
++                PrimaryAction("開啟 Shizuku") {
++                    if (!ShizukuBridge.openApp(context)) vm.refreshShizuku()
++                }
+             }
+ 
+-            !state.shizukuGranted -> {
++            ShizukuBridge.Status.NOT_GRANTED -> {
+                 Text("Shizuku 已啟動，尚未授權", style = Ty.Title)
+                 Spacer(Modifier.height(8.dp))
+-                Text("授權後才能執行快取與背景程序清理。", style = Ty.Caption)
++                Text("授權後才能執行全機快取清理。", style = Ty.Caption)
+                 Spacer(Modifier.height(12.dp))
+                 PrimaryAction("向 Shizuku 請求授權") { ShizukuBridge.requestPermission() }
+-                Spacer(Modifier.height(4.dp))
+-                QuietAction("重新檢查") { vm.refreshShizuku() }
+             }
+ 
+-            else -> {
++            ShizukuBridge.Status.READY -> {
+                 Text("已連上 Shizuku", style = Ty.Title)
+                 Spacer(Modifier.height(10.dp))
+                 HandoffRow(
+                     title = "清除全機 App 快取",
+-                    detail = "等同 pm trim-caches，不會動到帳號與設定",
++                    detail = "等同 pm trim-caches，不會動到帳號、設定與資料",
+                     actionLabel = if (state.shellBusy) "執行中" else "執行"
+                 ) { if (!state.shellBusy) vm.trimAllCaches() }
+-                Divider1()
+-                HandoffRow(
+-                    title = "結束背景 App",
+-                    detail = "只影響背景程序。系統可能在幾秒內重新拉起常駐服務。",
+-                    actionLabel = if (state.shellBusy) "執行中" else "執行"
+-                ) { if (!state.shellBusy) vm.killBackgroundApps() }
+ 
+                 if (state.shellOutput.isNotBlank()) {
+                     Spacer(Modifier.height(12.dp))
